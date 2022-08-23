@@ -1,0 +1,13 @@
+cell = triangle
+TT = TensorElement("Lagrange",cell,1,shape=(2,2))
+element = TT
+
+sts_total = Coefficient(TT)
+
+##simple shear in x dir##
+##sts_bc = sts_total[0,1] * ds(1)
+
+##axial tension in y dir##
+sts_bc = sts_total[1,1] * ds(1)
+
+forms = [sts_bc]

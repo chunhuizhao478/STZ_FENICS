@@ -1,0 +1,3 @@
+cell = triangle
+DG = FiniteElement("DG",cell,0)
+element = DG

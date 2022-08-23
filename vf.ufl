@@ -1,0 +1,47 @@
+###Define Function Space
+##Displacement
+cell = triangle
+W = VectorElement("Lagrange",cell,1)
+T = TensorElement("Lagrange",cell,1)
+
+##Define Trial and Test Function
+##Displacement
+du = TrialFunction(W)
+vv = TestFunction(W)
+
+###Define Coefficients
+##Note: these quantities are from image field
+u1 = Coefficient(W)             #unknown displacement @ current iter step  #image field#
+##u_tilde = Coefficient(W)        #known analytical displacement             #tilde field#
+
+###Define Constant
+E = Constant(cell)      #Young's Modulus
+nu = Constant(cell)     #Possion's Ratio
+
+###Define Coefficient
+sigma_tilde = Coefficient(T)   #stress tilde field
+
+###Define function to compute stain tensor
+def func_strain(u):
+    strain = sym(grad(u))
+    return strain 
+
+##Define function to compute stress
+def func_stress(E, nu, u):
+    stress = E / ( 1 + nu ) * ( func_strain(u) + nu / ( 1 - 2 * nu ) * tr( func_strain(u) ) * Identity(2) )
+    return stress
+    
+###Define FacetNormal
+n = FacetNormal(cell)
+
+###Define Residual forms
+R_du = inner( func_stress(E, nu, u1), grad(vv) ) * dx    
+R_du = R_du + dot( dot( sigma_tilde , n ) , vv ) * ds(3)   ##left   boundary  
+R_du = R_du + dot( dot( sigma_tilde , n ) , vv ) * ds(4)   ##right  boundary
+R_du = R_du + sigma_tilde[0,1] * ( 1)  * vv[0] * ds(1)     ##top    boundary
+R_du = R_du + sigma_tilde[0,1] * (-1)  * vv[0] * ds(2)     ##bottom boundary
+
+###Define Jocabian & forms
+F_u = R_du
+J_u = derivative(F_u, u1, du)
+forms = [F_u,J_u]

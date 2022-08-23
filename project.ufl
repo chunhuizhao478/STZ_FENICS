@@ -1,0 +1,21 @@
+#Compute strain field as a post processing
+
+cell = triangle
+T = TensorElement("Lagrange",cell,1,shape=(2,2))
+V = VectorElement("Lagrange",cell,1)
+
+deps = TrialFunction(T)
+tt = TestFunction(T)
+
+eps = Coefficient(T) 
+u = Coefficient(V) 
+
+def func_strain(u):
+    strain = sym(grad(u))
+    return strain 
+
+R = inner(func_strain(u),tt) * dx - inner(eps,tt) * dx
+
+F = R
+J = derivative(F, eps, deps)
+forms = [F,J]

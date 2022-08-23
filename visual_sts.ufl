@@ -1,0 +1,15 @@
+#This ufl is for visualization purpose, strain (FEM coarse mesh) - > strain (finer mesh)
+cell = triangle
+T = TensorElement("Lagrange",cell,1,shape=(2,2))
+
+dsts = TrialFunction(T)
+tt = TestFunction(T)
+
+sts_coarse = Coefficient(T) 
+sts_fine   = Coefficient(T) 
+
+R = inner(sts_coarse,tt) * dx - inner(sts_fine,tt) * dx
+
+F = R
+J = derivative(F, sts_fine, dsts)
+forms = [F,J]
