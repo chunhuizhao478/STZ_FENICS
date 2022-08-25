@@ -56,6 +56,9 @@ using namespace dolfin;
 #define gamma_threshold 0.093           //-- //threshold strain value //from the figure, there is maximum 3 reactivations for each stz, the simulation time actually doesn't allow more than 3 reactivation in this examplae
 #define gamma_threshold_per_iter 0.031  //threshold strain value for each time activation of STZ
 
+#define epsilon_threshold 0.093           //-- //threshold strain value //from the figure, there is maximum 3 reactivations for each stz, the simulation time actually doesn't allow more than 3 reactivation in this examplae
+#define epsilon_threshold_per_iter 0.031  //threshold strain value for each time activation of STZ
+
 //Time stepping
 #define dt       1e-3     //s  //time stepping //NOT specified > 4.61e-3 to avoid resolve the transformation 
 #define T        3e-1     //s  //total simulation time //0.6 -> gives overall shear strain 0.06 
@@ -85,7 +88,7 @@ double param_rho = 3;                    //- scalar as multiply of termination t
 double t_d = param_rho * t_terminate;     //s reactivation time
 bool reactivation = true;
 
-double step_eigenstrain = gamma_threshold_per_iter / ( t_terminate / dt_small );
+//double step_eigenstrain = gamma_threshold_per_iter / ( t_terminate / dt_small );
 
 
 //------------------------------------------------//
@@ -1299,11 +1302,33 @@ class stz_helper
 
     }
 
+    /*Compute eigen strain rate tensor (volumertic part)*/
+    //Created on Aug 24
+    void eigen_strain_volumetric(std::vector<double>  tension_strain, std::vector<double> s_vec, std::vector<double> n_vec, std::vector<double>& eps_eigen_tension, int stz_iter )
+    {
+        
+        //tension strain == epsilon_step_vec (as output in "biaxial_strain_rate_local" function) 
+        //see 2D Tensor Transformation in writing notes
+
+        //1. Need to create "eps_eigen_v", "eps_eigen_mpiv" vector
+
+        //
+        auto vs = tension_strain[stz_iter]; //gamma_step_vec
+
+        //
+        eps_eigen[0 + stz_iter * 4] = vs;
+        eps_eigen[1 + stz_iter * 4] = 0;
+        eps_eigen[2 + stz_iter * 4] = 0;
+        eps_eigen[3 + stz_iter * 4] = vs;
+
+    }
+
     /*Compute shear strain rate scalar (in-place)
     //Goal: shear strain rate scalar gamma* = 1 / B * 4 * ( 1 - nu ^ 2 ) / E * config_force Zsn (only shear components)
     //Input: shear strain rate (scalar function), configuration force (scalar function)
     //Output: shear strain rate (scalar function) */
-    void shear_strain_rate_local(std::vector<double> config_force_Zsn, std::vector<double> gamma_rate, int stz_iter, std::vector<double>& gamma_vec, std::vector<int>& active_status, std::vector<double>& gamma_step_vec, int option, double dt_in, std::vector<int>& reactivate_indicator, double step_eigenstrain)
+    //--delete used "step_eigenstrain" input
+    void shear_strain_rate_local(std::vector<double> config_force_Zsn, std::vector<double> gamma_rate, int stz_iter, std::vector<double>& gamma_vec, std::vector<int>& active_status, std::vector<double>& gamma_step_vec, int option, double dt_in, std::vector<int>& reactivate_indicator)
     {
 
         //active_status will record whether stz reaches threshold or not
@@ -1412,6 +1437,50 @@ class stz_helper
 
     }
 
+    /*Compute biaxial tension strain rate local*/
+    //Created on Aug 24
+    //--delete used "step_eigenstrain" input
+    void biaxial_strain_rate_local(std::vector<double> config_force_Zbeta, std::vector<double> epsilon_rate, int stz_iter, std::vector<double>& epsilon_vec, std::vector<int>& active_status, std::vector<double>& epsilon_step_vec, int option, double dt_in, std::vector<int>& reactivate_indicator)
+    {   
+        //JMPS
+        epsilon_rate[stz_iter] = 1 / ( B_ * pi_ * radius * radius * ( E / ( 1 - nu * nu )  )   ) * config_force_Zbeta[stz_iter];
+
+        //1. Need to create new "epsilon_rate", "epsilon_vec", "epsilon_step_vec"
+        //2. Need to specify new "epsilon_threshold", "epsilon_threshold_per_iter"
+        auto epsilon_val_stz = epsilon_vec[stz_iter];
+        
+        if ( epsilon_val_stz + dt_in * epsilon_rate[stz_iter] < epsilon_threshold ){ //if it is below threshold
+
+            if ( epsilon_val_stz + dt_in * epsilon_rate[stz_iter] < epsilon_threshold_per_iter ){
+
+                epsilon_step_vec[stz_iter]  = dt_in * epsilon_rate[stz_iter];
+                epsilon_vec[stz_iter]      += dt_in * epsilon_rate[stz_iter];
+
+            }
+            else{
+
+                active_status[stz_iter] = 2;
+
+                if (epsilon_val_stz > epsilon_threshold_per_iter){
+
+                    epsilon_step_vec[stz_iter]  = 0;
+
+                }
+                else{
+
+                    epsilon_step_vec[stz_iter]  = epsilon_threshold_per_iter - epsilon_val_stz;
+
+                }
+
+                epsilon_vec[stz_iter]  = 0;
+
+            }
+
+        }
+
+
+    }
+
     /*Compute configurational force scalar (in-place)
     //Goal: config_force_Zsn = image_stress_sn + sum( stress_tilde(site i) )
     //Input: image stress field, sum of local stz stress field, local vector s, local vector n
@@ -1478,6 +1547,44 @@ class stz_helper
         cfZsn += s_vec[1 + stz_iter * 2] * sts_total_val[3] * n_vec[1 + stz_iter * 2];  
 
         config_force_Zsn[stz_iter] = cfZsn;
+
+    }
+
+
+    /*Compute configurational force for biaxial tension case*/
+    //Created on Aug 24
+    void config_force_local_biaxial(std::shared_ptr<Function> sigma_total, std::vector<double>  s_vec, std::vector<double> n_vec, std::vector<double>& config_force_Zbeta, std::vector<double> locs, int stz_iter){
+        
+        //1. Need new config_force_Zbeta
+
+        //Get image field stress tensor at this stz site
+        Array<double> sts_total_val(4); //stress tensor
+        Array<double> point_locs_total(2);  //nodal coordinate
+
+        //Get nodal coordinate of stz
+        point_locs_total[0] = locs[0 + stz_iter * 2];
+        point_locs_total[1] = locs[1 + stz_iter * 2];
+
+        sigma_total->eval(sts_total_val,point_locs_total);
+
+        //Z_beta_beta = Znn + Zss
+        //Znn
+        double cfZnn = 0.0;
+
+        cfZnn += n_vec[0 + stz_iter * 2] * sts_total_val[0] * n_vec[1 + stz_iter * 2];
+        cfZnn += n_vec[0 + stz_iter * 2] * sts_total_val[1] * n_vec[1 + stz_iter * 2];
+        cfZnn += n_vec[1 + stz_iter * 2] * sts_total_val[2] * n_vec[0 + stz_iter * 2];
+        cfZnn += n_vec[1 + stz_iter * 2] * sts_total_val[3] * n_vec[1 + stz_iter * 2];  
+
+        //Zss
+        double cfZss = 0.0;
+
+        cfZss += n_vec[0 + stz_iter * 2] * sts_total_val[0] * n_vec[1 + stz_iter * 2];
+        cfZss += n_vec[0 + stz_iter * 2] * sts_total_val[1] * n_vec[1 + stz_iter * 2];
+        cfZss += n_vec[1 + stz_iter * 2] * sts_total_val[2] * n_vec[0 + stz_iter * 2];
+        cfZss += n_vec[1 + stz_iter * 2] * sts_total_val[3] * n_vec[1 + stz_iter * 2];  
+
+        config_force_Zbeta[stz_iter] = cfZnn + cfZss;
 
     }
 
@@ -2038,6 +2145,15 @@ int main(){
     std::vector<int> new_stz_count_global(rank_num, 0);        //vector contains number of new stzs from each processor
     std::vector<int> new_stz_displs(rank_num, 0);              //displs buffer for contains coordinate of new stzs
 
+    //Add vectors for volumetric Eshley part
+    std::vector<double> epsilondot       (N0*1, -__DBL_MAX__);    //array for storing gammadot : rate of tensile strain
+    std::vector<double> epsilon_vec      (N0*1,          0.0);    //array for storing gamma value: tensile strain in local coordinate
+    std::vector<double> epsilon_vec_mpi  (N0*1,            0);
+    std::vector<double> epsilon_step_vec (N0*1,          0.0);    //array for storing step gamma value (incremental analysis)
+    std::vector<double> configf_v        (N0*1, -__DBL_MAX__);    //array for storing configf : configurational force for volumetric strain
+    std::vector<double> eigen_eps_v      (N0*4, -__DBL_MAX__);    //array for storing eigenstrain rate (specified at each stz location)
+    std::vector<double> eigen_eps_mpiv   (N0*4, -__DBL_MAX__);    //array for storing eigenstrain rate after allreduce call
+
     //Initial STZ locs & shear strain energy
     stz_class->stz_init(ij, kl, N0, locs, engs_c, 0, N_new);
 
@@ -2272,6 +2388,7 @@ int main(){
         step_num += 1;
         
         //Compute shear strain energy (global)
+        //!May need to modify here to include volumertic change!
         stz_class->strain_energy(sts_total, phi_engs);
 
         //Reinitialize arrays
@@ -2459,6 +2576,7 @@ int main(){
             }
             
             //Compute shear strain energy at each stz site (stzs) ->engs
+            //!May need to modify here to include volumertic change!
             stz_class->strain_energy_local(phi_engs, locs, engs, stz_iter); //eval
 
             if (engs[stz_iter] > engs_c[stz_iter] && active_status[stz_iter] != 3 && active_status[stz_iter] != 1){ //activate change to 1 once it is activated and not finishing activate
@@ -2484,13 +2602,23 @@ int main(){
                 //stz_class->config_force_local(sts_image, sts_tilde, svec, nvec, configf, locs, stz_iter);
                 stz_class->config_force_local_test(sts_total, svec, nvec, configf, locs, stz_iter);
 
+                //Volumetric part
+                stz_class->config_force_local_biaxial(sts_total, svec, nvec, configf_v, locs, stz_iter); 
+
                 //Compute rate of shear strain (current stz) ->gamma_vec, active_status (1->possible->2), gamma_step_vec
-                stz_class->shear_strain_rate_local(configf, gammadot, stz_iter, gamma_vec, active_status, gamma_step_vec, option, dt_current, reactivate_indicator, step_eigenstrain); 
+                stz_class->shear_strain_rate_local(configf, gammadot, stz_iter, gamma_vec, active_status, gamma_step_vec, option, dt_current, reactivate_indicator); 
+
+                //Volumetric part
+                stz_class->biaxial_strain_rate_local(configf_v, epsilondot, stz_iter, epsilon_vec, active_status, epsilon_step_vec, option, dt_current, reactivate_indicator);
 
                 //Compute rate of eigenstrain (current stz) ->eigen_eps -- eigen_eps_mpi
                 stz_class->eigen_strain(gamma_step_vec, svec, nvec, eigen_eps, stz_iter);
 
+                //Volumetric part
+                stz_class->eigen_strain_volumetric(epsilon_step_vec, svec, nvec, eigen_eps_v, stz_iter);
+
                 //Compute new potential stzs sites (4 around current one) -> new_placed_stz_coord -- new_placed_stz_coord_global
+                //!Probably need to modify for volumetric case!
                 stz_class->new_stz_coord(locs, svec, nvec, stz_iter, new_placed_stz_coord);
 
             }
@@ -2509,8 +2637,14 @@ int main(){
         //**eigen_eps** //mpi vec only for storing/plotting, modify vec in local
         MPI_Allreduce(eigen_eps.data(), eigen_eps_mpi.data(), eigen_eps_mpi.size(), MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 
+        //Volumetric part -> eigen_eps_v
+        MPI_Allreduce(eigen_eps_v.data(), eigen_eps_mpiv.data(), eigen_eps_mpiv.size(), MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+
         //**gamma_vec** //mpi vec only for storing/plotting, modify vec in local
         MPI_Allreduce(gamma_vec.data(), gamma_vec_mpi.data(), gamma_vec_mpi.size(), MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+
+        //Volumetric part -> epsilon_vec_mpi
+        MPI_Allreduce(epsilon_vec.data(), epsilon_vec_mpi.data(), epsilon_vec_mpi.size(), MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 
         //**new_placed_stz_coord**
         //Get local new stz vec size
@@ -2536,6 +2670,12 @@ int main(){
         
         //------------------MPI Collective Op END----------------------------//
         //------------------MPI Collective Op END----------------------------//
+
+        //Combine volumetric + shear contribution to eigen_eps_mpi
+        //Note: eigen_eps_mpi should be re-computed at each time when doing mpi 
+        for ( int i = 0; i < eigen_eps_mpi.size(); i++ ){
+            eigen_eps_mpi[i] = eigen_eps_mpi[i] + eigen_eps_mpiv[i];
+        }
 
         //output info
         int notactnum   = std::count(active_status_mpi.begin(),active_status_mpi.end(), 0);
