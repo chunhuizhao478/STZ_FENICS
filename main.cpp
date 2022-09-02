@@ -1579,10 +1579,10 @@ class stz_helper
         //Zss
         double cfZss = 0.0;
 
-        cfZss += n_vec[0 + stz_iter * 2] * sts_total_val[0] * n_vec[1 + stz_iter * 2];
-        cfZss += n_vec[0 + stz_iter * 2] * sts_total_val[1] * n_vec[1 + stz_iter * 2];
-        cfZss += n_vec[1 + stz_iter * 2] * sts_total_val[2] * n_vec[0 + stz_iter * 2];
-        cfZss += n_vec[1 + stz_iter * 2] * sts_total_val[3] * n_vec[1 + stz_iter * 2];  
+        cfZss += s_vec[0 + stz_iter * 2] * sts_total_val[0] * s_vec[1 + stz_iter * 2];
+        cfZss += s_vec[0 + stz_iter * 2] * sts_total_val[1] * s_vec[1 + stz_iter * 2];
+        cfZss += s_vec[1 + stz_iter * 2] * sts_total_val[2] * s_vec[0 + stz_iter * 2];
+        cfZss += s_vec[1 + stz_iter * 2] * sts_total_val[3] * s_vec[1 + stz_iter * 2];  
 
         config_force_Zbeta[stz_iter] = cfZnn + cfZss;
 
@@ -1640,6 +1640,80 @@ class stz_helper
 
     }
 
+    //*Compute local coordinate (s,n) based on Mohr-Coulomb law (same as "stress-based activation", see also "GranMeso_Report3.pdf")
+    void coord_sn_local_mohr(std::shared_ptr<Function> sigma_total, 
+                             std::vector<double>& s_vec, 
+                             std::vector<double>& n_vec, 
+                             std::vector<double>  locs, 
+                             std::vector<double>  cf_gaussian,
+                             int stz_iter)
+    {
+        //[Edit Log]: 
+        //Create function (2022.9.2)
+
+        //[Logic]:
+        //stz is activated if: tau(x_stz) >= c_o - c_f(stz) sigma_mean(x_stz)
+        //tau(x_stz): resolved shear stress along "theta_incl_stz" of current stz       
+        //c_o: cohesion strength in stress unit                                         //need to provide as input !
+        //c_f(stz): c_f(stz) = tan( internal_angle_stz )                                //need to provide from gaussian distribution ! (->cf_gaussian)
+        //sigma_mean(x_stz): mean stress at current stz 
+        //theta_incl_stz = maximum_shear_dir + internal_angle_stz / 2
+
+        //Define double array to store results
+        Array<double> point_value(4); //stress tensor
+        Array<double> point_locs(2);  //nodal coordinate
+        double theta_max;             //maximum shear direction wrt x coord
+        double cf_stz;                //friction angle related coefficient for current stz
+        double internal_angle_stz;    //friction angle
+        double sigma_zz               //stress in the z direction to preserve plane strain condition 
+        double mean_stress            //mean stress value for current stz
+        double theta_incl_stz         //combined angle
+
+        //Get current stz location, cf
+        point_locs[0] = locs[0 + stz_iter * 2];
+        point_locs[1] = locs[1 + stz_iter * 2];
+
+        cf_stz = cf_gaussian[stz_iter];
+
+        //Get total stress tensor for stz loc through interpolation
+        sigma_total->eval(point_value,point_locs); //interpolate
+
+        //Get friction angle
+        internal_angle_stz = atan2(cf_stz);
+
+        //Get mean stress
+        sigma_zz = nu * ( sts11_vec[i] + sts22_vec[i] );
+        mean_stress = point_value[0] + point_value[2] + sigma_zz;
+        
+        //Compute maximum shear direction angle (same as before)
+        double a = abs(point_value[3] - point_value[0]);
+        double b = abs(point_value[1]);
+
+        if ( a > 1e9 * b ){
+            theta_max = pi_ / 4;
+            std::cout<<"CONDITON 1"<<std::endl;
+        }
+        else if ( b > 1e9 * a ){
+            theta_max = 0;
+            std::cout<<"CONDITON 2"<<std::endl;
+        }
+        else if ( a == 0 && b == 0 ){
+            theta_max = 0;
+            std::cout<<"CONDITON 3"<<std::endl;
+        }
+        else{
+            theta_max = 0.5 * atan2((point_value[3] - point_value[0]) , ( 2.0 * point_value[1] )); //* 180.0 / pi_; //in degree; //if point_value[1] = 0, gives nan, need to make sure it doesn't affect results //atan2 returns [-pi,pi]
+        }
+
+        //Compute combined maximum shear and internal friction angle
+        theta_incl_stz = internal_angle_stz + theta_max;
+
+        //Compute s,n vector
+        s_vec[0 + stz_iter * 2] =      cos(theta_incl_stz);  s_vec[1 + stz_iter * 2] = sin(theta_incl_stz);
+        n_vec[0 + stz_iter * 2] = -1 * sin(theta_incl_stz);  n_vec[1 + stz_iter * 2] = cos(theta_incl_stz);
+        
+
+    }
     /*Compute coordinates for newly placed stzs once one existing stz is activated 
     //Goal: as one initial step only consider maximum shear direction, four stzs are placed (2 along s vec, 2 along n vec)
     //The distance between new stzs center and the existing activated stz is 2 * radius
