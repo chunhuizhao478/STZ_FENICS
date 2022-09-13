@@ -90,6 +90,15 @@ bool reactivation = true;
 
 //double step_eigenstrain = gamma_threshold_per_iter / ( t_terminate / dt_small );
 
+//Edit Log: 9.13.2022 
+//add activation_mode; add cf_mean, cf_std, cf_threshold; 
+//Note: "ENG"(Energy-based) - 0 or "MOHR"(Mohr-Comb) - 1 activation modes
+int activation_mode = 1;
+
+//cf parameters
+double cf_mean = 0.75;      //cf gaussian distribution : mean value
+double cf_std  = 0.15;      //cf gaussian distribution : standard deviation
+double cf_threshold = 0.15; //cutoff at one standard deviation : cf lie within the range (0.6, 0.9)
 
 //------------------------------------------------//
 //----------User Defined Nonlinear Problem--------//
@@ -815,10 +824,21 @@ class stz_helper
     }
 
     //C++ built-in random gaussian distribution
-    void random_gaussian_distribution(std::vector<double>& eng, int flag, int N0, int N_new){
-        
+    void random_gaussian_distribution(std::vector<double>& eng, 
+                                                      int flag, 
+                                                      int N0, 
+                                                      int N_new,
+                                                      double phi_c_in,
+                                                      double phi_s_in,
+                                                      double phi_threshold_in){
+
+        //Edit Log:
+        //9.13.2022 replace macro [phi_c phi_s phi_threshold] as input parameters [phi_c_in,phi_s_in,phi_threshold_in] (for cohesion strength using gaussian distribution)
+        //Note: phi_c_in: mean value, phi_s_in: standard deviation, phi_threshold_in: threshold(bound) of data
+
+
         std::default_random_engine generator;
-        std::normal_distribution<double> distribution(phi_c,phi_s);
+        std::normal_distribution<double> distribution(phi_c_in,phi_s_in);
 
         double engs_gauss;
 
@@ -826,7 +846,7 @@ class stz_helper
 
             for (int i = 0; i < N0; i ++){
                 engs_gauss = distribution(generator);
-                while ( engs_gauss <= phi_c - phi_threshold || engs_gauss >= phi_c + phi_threshold ){ 
+                while ( engs_gauss <= phi_c_in - phi_threshold_in || engs_gauss >= phi_c_in + phi_threshold_in ){ 
                     engs_gauss = distribution(generator);
                 }
                 eng[i] = engs_gauss;
@@ -837,10 +857,10 @@ class stz_helper
 
             for (int i = N0; i < N_new; i ++){
                 engs_gauss = distribution(generator);
-                while ( engs_gauss <= phi_c - phi_threshold || engs_gauss >= phi_c + phi_threshold ){
+                while ( engs_gauss <= phi_c_in - phi_threshold_in || engs_gauss >= phi_c_in + phi_threshold_in ){
                     engs_gauss = distribution(generator);
                 }
-                eng[i] = engs_gauss;
+                eng.push_back(engs_gauss); //add elem into vector (without predefined vector length)
             }
 
         }
@@ -1665,9 +1685,9 @@ class stz_helper
         double theta_max;             //maximum shear direction wrt x coord
         double cf_stz;                //friction angle related coefficient for current stz
         double internal_angle_stz;    //friction angle
-        double sigma_zz               //stress in the z direction to preserve plane strain condition 
-        double mean_stress            //mean stress value for current stz
-        double theta_incl_stz         //combined angle
+        double sigma_zz;              //stress in the z direction to preserve plane strain condition 
+        double mean_stress;           //mean stress value for current stz
+        double theta_incl_stz;        //combined angle
 
         //Get current stz location, cf
         point_locs[0] = locs[0 + stz_iter * 2];
@@ -1706,7 +1726,7 @@ class stz_helper
         }
 
         //Compute combined maximum shear and internal friction angle
-        theta_incl_stz = internal_angle_stz + theta_max;
+        theta_incl_stz = 0.5 * internal_angle_stz + theta_max;
 
         //Compute s,n vector
         s_vec[0 + stz_iter * 2] =      cos(theta_incl_stz);  s_vec[1 + stz_iter * 2] = sin(theta_incl_stz);
@@ -2228,11 +2248,20 @@ int main(){
     std::vector<double> eigen_eps_v      (N0*4, -__DBL_MAX__);    //array for storing eigenstrain rate (specified at each stz location)
     std::vector<double> eigen_eps_mpiv   (N0*4, -__DBL_MAX__);    //array for storing eigenstrain rate after allreduce call
 
+    //Initialize c_f parameters containers [size:num of stzs] 
+    std::vector<double> cf_gaussian (N0*1, -__DBL_MAX__);    //array for storing cf from gaussian distribution
+
     //Initial STZ locs & shear strain energy
     stz_class->stz_init(ij, kl, N0, locs, engs_c, 0, N_new);
 
     //Use c++ built-in
-    //stz_class->random_gaussian_distribution(engs_c,0,N0,N_new);
+    //stz_class->random_gaussian_distribution(engs_c,0,N0,N_new); //input parameters change!
+    //Edit Log: 9.13.2022 - create
+    if (activation_mode == 1){ //MOHR activation
+        //Compute initial c_f
+        stz_class->random_gaussian_distribution(cf_gaussian, 0, N0, N_new, cf_mean, cf_std, cf_threshold);
+    }
+
 
     //Use c++ built-in
     //stz_class->random_uniform_distribution(locs, 0, N0, N_new);
@@ -2474,6 +2503,11 @@ int main(){
             
             stz_class->stz_init(ij, kl, N0, locs, engs_c, 1, N_new); //->engs_c
 
+            //Update cf parameters
+            if (activation_mode == 1){ //MOHR
+                stz_class->random_gaussian_distribution(cf_gaussian, 1, N0, N_new, cf_mean, cf_std, cf_threshold);
+            }
+
             //use c++ built in
             //stz_class->random_gaussian_distribution(engs_c,1,N0,N_new); //->engs_c
             
@@ -2650,14 +2684,30 @@ int main(){
             }
             
             //Compute shear strain energy at each stz site (stzs) ->engs
-            //!May need to modify here to include volumertic change!
+            //Edit Log: 9.13.2022 - add activation mode option 
             stz_class->strain_energy_local(phi_engs, locs, engs, stz_iter); //eval
 
-            if (engs[stz_iter] > engs_c[stz_iter] && active_status[stz_iter] != 3 && active_status[stz_iter] != 1){ //activate change to 1 once it is activated and not finishing activate
-                active_status[stz_iter] = -2;
-                if (reactivate_indicator[stz_iter] >= -2 * dt_current && reactivate_indicator[stz_iter] <= 0.0){
-                    std::cout<<"! STZ REACTIVATED ! -> "<<stz_iter<<std::endl;
+            if (activation_mode == 0){ //ENGS : criterion : engs[stz_iter] > engs_c[stz_iter]
+
+                if (engs[stz_iter] > engs_c[stz_iter] && active_status[stz_iter] != 3 && active_status[stz_iter] != 1){ //activate change to 1 once it is activated and not finishing activate
+                    active_status[stz_iter] = -2;
+                    if (reactivate_indicator[stz_iter] >= -2 * dt_current && reactivate_indicator[stz_iter] <= 0.0){
+                        std::cout<<"! STZ REACTIVATED ! -> "<<stz_iter<<std::endl;
+                    }
                 }
+            
+            }
+            else if (activation_mode == 1){ //MORH : criterion : tau_shear_stress >= co - cf * sigma_mean_stress
+
+                //update "coord_sn_local_nohr" function here to compute "tau_shear_stress (given maximum incl direction)", compare the result and output boolean type flag
+
+                if (engs[stz_iter] > engs_c[stz_iter] && active_status[stz_iter] != 3 && active_status[stz_iter] != 1){ //activate change to 1 once it is activated and not finishing activate
+                    active_status[stz_iter] = -2; //here if activated, the direction vector is set, the value should be 1 only, so there is no intermediate "-2" stage.
+                    if (reactivate_indicator[stz_iter] >= -2 * dt_current && reactivate_indicator[stz_iter] <= 0.0){
+                        std::cout<<"! STZ REACTIVATED ! -> "<<stz_iter<<std::endl;
+                    }
+                }
+
             }
 
             if (active_status[stz_iter] == 1 || active_status[stz_iter] == -2){
